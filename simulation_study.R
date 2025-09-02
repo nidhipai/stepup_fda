@@ -5,10 +5,11 @@ library(mgcv)
 # Set up -----------------------------------------------------------------------
 
 # Root folder of project
-setwd("/users/9/pai00032/step_up_sim")
+#setwd()
 
 dat <- readRDS("data/dat.RDS")
-source("code/fosr_fpcareg.R")
+source("code/fosr_functions.R")
+source("code/fpcareg_functions.R")
 
 steps_data <- dat$steps_w[, 1:24]
 all_na_int <- rowSums(!is.na(steps_data)) <= 3
@@ -17,7 +18,11 @@ fpca_res_int <- fpca.face(unclass(steps_f), knots = 15, pve = .95)
 steps_data <- dat$steps_w[, 25:36]
 all_na_post <- rowSums(!is.na(steps_data)) <= 3
 
-# Helper function
+params <- list(
+  int = list(start = 1, end = 24, fpca_k = 15, fosr_k = 20, all_na = all_na_int),
+  post = list(start = 25, end = 36, fpca_k = 8, fosr_k = 7, all_na = all_na_post)
+)
+
 unAsIs <- function(X) {
   if("AsIs" %in% class(X)) {
     class(X) <- class(X)[-match("AsIs", class(X))]
@@ -25,7 +30,7 @@ unAsIs <- function(X) {
   X
 }
 
-full_data_res_int <- fosr_coef_function(dat[!all_na_int, ], "int")
+full_data_res_int <- fosr_coef_function(dat[!all_na_int, ], "int", npc = 2, time_varying_cov = F)
 
 # Functions --------------------------------------------------------------------
 
@@ -35,19 +40,18 @@ full_data_res_int <- fosr_coef_function(dat[!all_na_int, ], "int")
 dat_not_na <- dat[!params[["int"]][["all_na"]], ]
 
 ## Get the fixed effects from the real data
-arm_coef_df <- full_data_res_int[[1]]
+arm_coef_df <- full_data_res_int$arm_coef_df
 # Matrix with cols collab, comp, supp
 arm_coef_mat <- arm_coef_df %>%
   pivot_wider(names_from = arm, values_from = value) %>%
   select(-week) %>%
   as.matrix()
-intercept <- full_data_res_int[[2]]
-baseline_steps <- full_data_res_int[[3]]
-covar_coef <- full_data_res_int[[8]]
-coef_mat <- cbind(intercept, arm_coef_mat, baseline_steps) # 24 x 5
+intercept <- full_data_res_int$intercept
+covar_coef <- full_data_res_int$p_covariates
+coef_mat <- cbind(intercept, arm_coef_mat) # 24 x 4
 
 ## Get error variance
-error_var <- full_data_res_int[[5]]$sig2
+error_var <- full_data_res_int$fosr$sig2
 
 ## Get eigenfunctions/values
 ef <- fpca_res_int$efunctions # 24 x 2
@@ -58,9 +62,8 @@ generate_data <- function(N) {
   sample <- dat_not_na %>% sample_n(N, replace = T)
   
   # Assemble fixed effects
-  X_mat <- model.matrix(~ 1 + arm + baseline_steps + start_day + 
-                          ESE_sticking_to_it + age + gender
-                          , data = sample) # 602 x 5
+  X_mat <- model.matrix(~ 1 + arm + start_day + baseline_steps + age + gender
+                        , data = sample) # 602 x 4
   fixed <- X_mat %*% t(cbind(coef_mat, matrix(rep(covar_coef, each = 24), nrow = 24)))
   
   ## Assemble random effects
@@ -89,16 +92,17 @@ generate_data <- function(N) {
 }
 
 ise <- function(est, truth) {
-  # IMPT: It's set up for intervention period
+  # IMPT: Set up for intervention period
   sfsmisc::integrate.xy(x = 1:24, fx = (est - truth)^2)
 }
 
 # Run simulation ---------------------------------------------------------------
 
-intermed_res_folder <- "simulation_results/take_cov_2"
-intermed_res_folder_fpca <- "simulation_results/take_cov_2_fpca"
+intermed_res_folder <- "simulation_results/jn_sim_fosr"
+intermed_res_folder_fpca <- "simulation_results/jn_sim_fpca"
 
-N_options <- c(600, 900, 1200, 1500, 1800, 2100, 2400)
+N_options <- c(100, 200, 300, 600, 900, 1200, 1500, 1800, 2100, 2400)
+
 job_number <- as.numeric(Sys.getenv('SLURM_ARRAY_TASK_ID')) # Task number in job
 
 for (N in N_options) {
@@ -110,47 +114,43 @@ for (N in N_options) {
   
   #Fit FoSR model
   res <- fosr_coef_function(sample, "int", npc = 2)
-  arm_coef_mat_hat <- res[[1]] %>%
+  arm_coef_mat_hat <- res$arm_coef_df %>%
     pivot_wider(names_from = arm, values_from = value) %>%
     select(-week) %>%
     as.matrix()
-  intercept_hat <- res[[2]]
-  baseline_steps_hat <- res[[3]]
+  intercept_hat <- res$intercept
   coef_mat_hat <- cbind("week" = 1:24, "intercept" = intercept_hat, arm_coef_mat_hat,
-                        "baseline_steps" = baseline_steps_hat,
                         "N" = N,
                         "job_number" = job_number,
                         "seed" = job_number * 50 + N / 100)
   covar_coef_hat <- c(N = N,
                       job_number = job_number,
                       seed = job_number * 50 + N / 100,
-                      res[[8]])
-
+                      res$p_covariates)
+  
   saveRDS(coef_mat_hat, paste0(intermed_res_folder, "/", N, "-", job_number, ".RDS"))
   saveRDS(covar_coef_hat, paste0(intermed_res_folder,"/", N, "-", job_number, "-covar.RDS"))
   
   # Fit FPCA + regression model
   res <- fpca_coef_function(sample, "int", npc = 2)
-  arm_coef_mat_hat <- res[[1]] %>%
+  arm_coef_mat_hat <- res$arm_coef_df %>%
     pivot_wider(names_from = arm, values_from = value) %>%
     select(-week) %>%
     as.matrix()
-  intercept_hat <- res[[2]]
-  baseline_steps_hat <- res[[3]]
-  coef_mat_hat <- cbind("week" = 1:24, "intercept" = intercept_hat, arm_coef_mat_hat, 
-                        "baseline_steps" = baseline_steps_hat,
+  intercept_hat <- res$intercept
+  coef_mat_hat <- cbind("week" = 1:24, 
+                        "intercept" = intercept_hat, arm_coef_mat_hat, 
                         "N" = N,
                         "job_number" = job_number,
                         "seed" = job_number * 50 + N / 100)
   covar_coef_hat <- cbind(N = N,
                           job_number = job_number,
                           seed = job_number * 50 + N / 100,
-                          res[[8]])
+                          res$covar_coef)
   
   saveRDS(coef_mat_hat, paste0(intermed_res_folder_fpca, "/", N, "-", job_number, ".RDS"))
   saveRDS(covar_coef_hat, paste0(intermed_res_folder_fpca,"/", N, "-", job_number, "-covar.RDS"))
 }
-
 
 # Helpful code to analyze results -----------------------------------------------
 
@@ -161,4 +161,3 @@ fixed_ise <- sapply(1:(S * length(N_options) * 2), function(s) {
     ise(s_res[, k + 1], coef_mat[, k])
   }), s_res[1, "job_number"], s_res[1, "N"], s_res[1, "method"])
 }) %>% t()
-
