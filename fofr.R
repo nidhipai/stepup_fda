@@ -32,7 +32,7 @@ fofr_function <- function(sample_ids) {
   post_imp <- fpca_res_post_bs$scores %*% t(fpca_res_post_bs$efunctions) + pop_avg[start:end]
   imp_dat$steps_w[, start:end] <- ifelse(is.na(imp_dat$steps_w[, start:end]),
                                          post_imp, imp_dat$steps_w[, start:end])
-
+  
   # Fix after imputation
   imp_dat$steps_w_int <- I(imp_dat$steps_w[, 1:24])
   imp_dat$steps_w_post <- I(imp_dat$steps_w[, 25:36])
@@ -66,10 +66,10 @@ fofr_function <- function(sample_ids) {
   
   # Add other covariates
   # Refit model with arm and baseline steps
-  fofr_df$baseline_steps <- rep(imp_dat$baseline_steps, each = 12)
+  #fofr_df$baseline_steps <- rep(imp_dat$baseline_steps, each = 12)
   #fofr_mgcv_df$arm_long <- rep(imp_dat$arm, each = 12)
   fofr_df$start_day <- rep(imp_dat$start_day, each = 12)
-  fofr_df$ESE_sticking_to_it <- rep(imp_dat$ESE_sticking_to_it, each = 12)
+  fofr_df$baseline_steps <- rep(imp_dat$ESE_sticking_to_it, each = 12)
   fofr_df$age <- rep(imp_dat$age, each = 12)
   fofr_df$gender <- rep(as.numeric(imp_dat$gender == "Male"), each = 12)
   
@@ -89,7 +89,7 @@ fofr_function <- function(sample_ids) {
   #fofr_mgcv_df$baseline_steps <- XvL * match_XvL(imp_dat$baseline_steps)
   
   # Necessary for residual modeling
-  # Can't be the original id because then R.E. have same ids
+  # Can't be the original id because then R.E. are shared
   fofr_df$re_id <- factor(rep(1:length(sample_ids), each = 12))
   
   # Add post-intervention period eigenfunctions
@@ -99,21 +99,26 @@ fofr_function <- function(sample_ids) {
   fofr_df <- fofr_df %>%
     left_join(ef_df, by = join_by(Sv == week))
   
+  # TODO can change
+  #sv <- as.vector(sv)
+  
   # Fit model ----------------------------------------------------------------
   fofr_sample <- bam(wv ~ s(sv, bs = "ps", k = 8) +
-                         te(Uv, Sv, by = collaborative, bs = "ps",
-                            k = c(5, 5)) +
-                         te(Uv, Sv, by = competitive, bs = "ps", 
-                            k = c(5, 5)) +
-                         te(Uv, Sv, by = supportive, bs = "ps", 
-                            k = c(5, 5)) +
-                         te(Uv, Sv, by = control, bs = "ps", 
-                            k = c(5, 5)) +
-                         s(sv, by = baseline_steps, bs = "ps", k = 10) +
-                         s(re_id, by = ef_1, bs = "re") + s(re_id, by = ef_2, bs = "re") +
-                         start_day + ESE_sticking_to_it + age + gender,
-                       method = "fREML",
-                       data = fofr_df)
+                       # te(Uv, Sv, by = XvL, bs = "ps", m = list(c(2, 1), c(2, 1)), #sp = c(1.3, 3.9),
+                       #    k = c(5, 5)) +
+                       te(Uv, Sv, by = collaborative, bs = "ps", #m = list(c(2, 1), c(2, 1)), #sp = c(1.3, 3.9),
+                          k = c(5, 5)) +
+                       te(Uv, Sv, by = competitive, bs = "ps", #m = list(c(2, 1), c(2, 1)), #sp = c(1.2, 3.9),
+                          k = c(5, 5)) +
+                       te(Uv, Sv, by = supportive, bs = "ps", #m = list(c(2, 1), c(2, 1)), #sp = c(1.1, 3.9),
+                          k = c(5, 5)) +
+                       te(Uv, Sv, by = control, bs = "ps", #m = list(c(2, 1), c(2, 1)), #sp = c(1.2, 3.9),
+                          k = c(5, 5)) +
+                       #s(sv, by = baseline_steps, bs = "ps", k = 10) +
+                       s(re_id, by = ef_1, bs = "re") + s(re_id, by = ef_2, bs = "re") +
+                       start_day + age + gender + baseline_steps,
+                     method = "fREML", #chunk.size = 10000, 
+                     data = fofr_df)
   summary_fofr <- summary(fofr_sample)
   
   # Extract coefficients-------------------------------------------------------
@@ -121,29 +126,22 @@ fofr_function <- function(sample_ids) {
   sv_pred <- seq(25, 36, length = length(S))
   df_pred <- expand.grid(Uv = uv_pred, Sv = sv_pred) %>%
     mutate(sv = rep(S, length(U)), XvL = 1, control = 1, collaborative = 1, supportive = 1, 
-           competitive = 1, baseline_steps = 1, steps_long = 1, ef_1 = 1, ef_2 = 1, 
-           re_id = fofr_df$re_id[1], start_day = 1, gender = 1, ESE_sticking_to_it = 1, age = 1)
+           competitive = 1, steps_long = 1, ef_1 = 1, ef_2 = 1, 
+           re_id = fofr_df$re_id[1], start_day = 1, gender = 1,  age = 1, baseline_steps = 1)
   pred_res <- predict(fofr_sample, type = "terms", newdata = df_pred, se = F)
   
   # Extract intercept
   fixed_int <- summary_fofr$p.coeff[[1]]
   intercept <- data.frame(s = 25:36, 
                           value = fixed_int + pred_res[1:12, "s(sv)"])
-  
-  # Extract baseline steps coef
-  baseline_coef <- data.frame(value = pred_res[1:12, "s(sv):baseline_steps"],
-                              s = 25:36)
-  
   # Extract arm
   arm_coef <- data.frame(collaborative = pred_res[, "te(Uv,Sv):collaborative"],
-                          competitive = pred_res[, "te(Uv,Sv):competitive"],
-                          supportive = pred_res[, "te(Uv,Sv):supportive"],
-                          control = pred_res[, "te(Uv,Sv):control"])
+                         competitive = pred_res[, "te(Uv,Sv):competitive"],
+                         supportive = pred_res[, "te(Uv,Sv):supportive"],
+                         control = pred_res[, "te(Uv,Sv):control"])
   arm_coef <- cbind(arm_coef, expand.grid(u = uv_pred, s = sv_pred))
   
-  list(intercept = intercept, baseline_coef = baseline_coef, 
-       arm_coef = arm_coef, model = fofr_sample, 
-       model = fofr_sample)
+  list(intercept = intercept, arm_coef = arm_coef, model = fofr_sample)
 }
 
 # Bootstrap --------------------------------------------------------------------
@@ -166,16 +164,45 @@ while (b <= B) {
     bs_arm_coef <- rbind(bs_arm_coef, fofr_res$arm_coef %>% mutate(b = b))
     bs_intercept <- rbind(bs_intercept, fofr_res$intercept %>% mutate(b = b))
     bs_baseline_coef <- rbind(bs_baseline_coef, fofr_res$baseline_coef %>% mutate(b = b))
-    
     b <- b + 1
   }, error = function(e) {
     print(e)
   })
 }
 
-# Bootstrap plots & CI ---------------------------------------------------------
+# Full data results & plots ----------------------------------------------------
 
-## Arm coef --------------------------------------------------------------------
+full_fofr_res <- fofr_function(dat$id[!all_na])
+full_intercept <- full_fofr_res$intercept
+full_arm_coef <- full_fofr_res$arm_coef
+full_arm_coef_long <- full_arm_coef %>%
+  pivot_longer(cols = c("collaborative", "competitive", "supportive", "control"),
+               names_to = "arm", values_to = "value") %>%
+  mutate(arm = fct_recode(arm, 
+                          "Collaborative" = "collaborative",
+                          "Competitive" = "competitive", "Supportive" = "supportive", 
+                          "Control" = "control")) %>%
+  mutate(arm = fct_relevel(arm,
+                           "Collaborative", "Competitive", "Supportive", "Control"))
+
+# Intercept
+full_intercept %>%
+  ggplot(aes(x = s, y = value)) +
+  geom_line() +
+  theme_bw() +
+  labs(x = "Week", y = "Intercept")
+
+# Define a custom scale so it stays consistent
+custom_gradient <- scale_fill_gradientn(limits = c(-.5, .5),
+                                        colors = c("#3E502B","#8cae68","#c6d7b4","#ffffff","#b2d0d3","#64a0a6", "#34575B"),
+                                        values = scales::rescale(c(-.5, -.18, -.05, 0, .05, .18, .5)))
+
+# Smaller range (good for coefficient without CI)
+custom_gradient_lim <- scale_fill_gradientn(limits = c(-.31, .31),
+                                            colors = c("#3E502B","#8cae68","#c6d7b4","#ffffff","#b2d0d3","#64a0a6", "#34575B"),
+                                            values = scales::rescale(c(-.31, -.18, -.08, 0, .08, .18, .31)))
+
+# Bootstrap CI and plots -------------------------------------------------------
 
 # Put arm dfs in long form
 bs_arm_coef_long <- bs_arm_coef %>%
@@ -192,7 +219,7 @@ se_res <- bs_arm_coef_long %>%
   group_by(arm, s, u) %>%
   summarize(se = sd(value)) %>%
   inner_join(full_arm_coef_long, by = c("arm", "s", "u")) %>%
-  rename(full_value = value) 
+  rename(full_value = value) # This is value computed with all data
 
 # Unadjusted Wald at each point
 unadjusted <- se_res %>% mutate(q = 1.96)
@@ -211,6 +238,24 @@ se_df <- cma %>%
   bind_rows(unadjusted %>% mutate(method = "Unadjusted")) %>%
   mutate(lower = full_value - q * se, upper = full_value + q * se)
 
+## Plot lower and upper bounds of CI surface-----------------------------------
+
+combined_fofr_ci <- se_df %>%
+  select(-c(q, se)) %>%
+  pivot_longer(cols = c(full_value, lower, upper), names_to = "type", values_to = "value") %>%
+  mutate(type = recode(type, "full_value" = "Point estimate", 
+                       "lower" = "Lower", "upper" = "Upper")) %>%
+  ggplot(aes(x = u, y = s, fill = value)) +
+  facet_grid(arm ~ type) +
+  geom_tile() +
+  coord_equal(expand = F) + # Scale x and y same, prevent border
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Week (intervention period)", y = "Week (follow-up period)",
+       title = "FoFR coefficients", fill = "Value") +
+  theme(strip.background = element_rect(fill = "transparent", color = "transparent")) +
+  custom_gradient
+
 # Mask out cells that aren't significant
 fofr_p_plot <- se_df %>%
   filter(method == "CMA") %>%
@@ -222,6 +267,72 @@ fofr_p_plot <- se_df %>%
   theme_bw() +
   theme(legend.position = "bottom") +
   labs(x = "Week (intervention period)", y = "Week (follow-up period)",
-        fill = "Coefficient") +
+       fill = "Coefficient") +
   theme(strip.background = element_rect(fill = "transparent", color = "transparent")) +
   custom_gradient_lim
+
+# Mask out plot + full coef plot
+combined_p_full_fofr_plot <- se_df %>%
+  filter(method == "CMA") %>%
+  mutate(full_value = ifelse((lower < 0) & (upper > 0), 0, full_value)) %>% 
+  mutate(value = full_value) %>%
+  select(arm, s, u, value) %>%
+  mutate(row = "Significant") %>%
+  bind_rows(full_arm_coef_long %>% mutate(row = "All")) %>%
+  ggplot(aes(x = u, y = s, fill = value)) +
+  facet_grid(row ~ arm) +
+  geom_tile() +
+  coord_equal(expand = F) + # Scale x and y same, prevent border
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Week (intervention period)", y = "Week (follow-up period)",
+       fill = "Coefficient") +
+  theme(strip.background = element_rect(fill = "transparent", color = "transparent")) +
+  theme(legend.key.width = unit(2, "cm")) +
+  custom_gradient_lim
+
+
+# Cross-section plot -----------------------------------------------------------
+
+
+target_s <- 26
+
+cross_sec_plot <- se_df %>%
+  filter(s == target_s) %>%
+  ggplot(aes(x = u, y = full_value)) +
+  facet_wrap(~ arm, nrow = 1) +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = method), alpha = 1) + 
+  geom_line() +
+  theme_bw() +
+  labs(x = "Week", y = "Coefficient") +
+  guides(fill = guide_legend(title = "Method")) +
+  scale_fill_manual(values = colors_light_dark) +
+  #theme(legend.position = "bottom") +
+  theme(panel.spacing.x = unit(.75, "lines")) +
+  theme(strip.background = element_rect(fill = "transparent", color = "transparent"))
+
+# Plot BS replications individually
+bs_cross_sec_plot <- bs_arm_coef_long %>%
+  mutate(type = "Bootstrap") %>%
+  bind_rows(full_arm_coef_long %>% mutate(type = "Full data", b = 0)) %>%
+  filter(abs(s - target_s) < .1) %>%
+  filter(b %in% 0:20) %>%
+  mutate(b = factor(b, levels = c(1:20, 0))) %>%
+  ggplot(aes(x = u, y = value, group = b, color = type, size = type)) +
+  scale_size_manual(values = c(.7, .7)) +
+  scale_color_manual(values = c("#B2B2B2", "black")) +
+  geom_line(alpha = .8) +
+  facet_wrap(~ arm, nrow = 1) +
+  labs(x = "Week", y = "Coefficient", color = "Data sample", size = "Data sample") +
+  theme_bw() +
+  #guides(size = element_blank()) +
+  theme(#legend.position = "bottom",
+    panel.spacing.x = unit(.75, "lines")) +
+  theme(strip.background = element_rect(fill = "transparent", color = "transparent"))
+
+# Patchwork together the two
+combined_bs_cross_sec_plot <- (cross_sec_plot +
+                                 theme(axis.title.x = element_blank(),
+                                       axis.text.x = element_blank(),
+                                       axis.ticks.x = element_blank())) /
+  (bs_cross_sec_plot + theme(strip.text.x = element_blank())) 
