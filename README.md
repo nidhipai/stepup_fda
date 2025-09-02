@@ -2,7 +2,7 @@
 
 Code accompanying "Quantifying Physical Activity Intervention Effects via Functional Regression".
 
-Public data is not available.
+The data used in this paper to support our findings cannot be shared publicly due to data use agreements and the privacy of the participants, but will be shared on reasonable request.
 
 This repository contains the following code files:
 - fpca.R: Conduct function principal components analysis (FPCA) and run a regression of eigenfunction scores on covariates
